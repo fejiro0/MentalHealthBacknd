@@ -61,3 +61,6 @@ __pycache__/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Hardware configuration (contains sensitive WiFi/Firebase credentials)
+src/config.h

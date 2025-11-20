@@ -1,5 +1,7 @@
 #include <Arduino.h>
+#include "AZ3166WiFi.h"
 #include "Wire.h"
+#include "MXChipFirebase.h"
 
 // ============================================================================
 // DIRECT HARDWARE SENSOR IMPLEMENTATION
@@ -91,6 +93,24 @@
 #define SOUND_BASELINE_SAMPLES 50    // Samples to take for baseline calibration
 #define SOUND_BASELINE_THRESHOLD 5   // Minimum change from baseline to register as sound
 
+// Configuration - Create src/config.h with your actual values
+// See src/config.h.example for template
+#ifdef CONFIG_H
+#include "config.h"
+#else
+// Default placeholder values - REPLACE WITH YOUR ACTUAL VALUES
+// Copy src/config.h.example to src/config.h and fill in your credentials
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#define PROXY_SERVER_IP "192.168.1.100"  // Your computer's IP address
+#define PROXY_SERVER_PORT 3000
+#define PROXY_ENDPOINT "/sensor-data"
+#define FIREBASE_HOST "your-project-default-rtdb.firebaseio.com"
+#define FIREBASE_PROJECT_ID "your-project-id"
+#define DEVICE_ID "MXCHIP_001"
+#define FIREBASE_UPDATE_INTERVAL_MS 2000
+#endif
+
 // ============================================================================
 // DIRECT I2C COMMUNICATION FUNCTIONS
 // ============================================================================
@@ -137,56 +157,101 @@ int16_t i2cRead16Bit(uint8_t deviceAddr, uint8_t regL, uint8_t regH) {
 class SoundCalibrator {
 private:
     int baselineValue;
+    int baselinePeakToPeak;  // Natural variation in quiet room
     bool isCalibrated;
-    int calibrationSamples;
+    float smoothedValue;
+    
+    // Sensitivity settings
+    const float SMOOTHING = 0.80f;  // 80% old, 20% new (stable but responsive)
+    const float SENSITIVITY = 2.0f;  // Amplify variations for distant sounds
     
 public:
     SoundCalibrator() {
         baselineValue = 0;
+        baselinePeakToPeak = 0;
         isCalibrated = false;
-        calibrationSamples = 0;
+        smoothedValue = 0.0f;
     }
     
     // Calibrate baseline during quiet period
     void calibrate() {
         Serial.println("🎤 Sound Sensor: Starting baseline calibration...");
-        Serial.println("🎤 Please keep quiet for 5 seconds...");
+        Serial.println("🎤 Please keep quiet for 3 seconds...");
         
-        long sum = 0;
-        int samples = 0;
+        long sumAvg = 0;
+        long sumPeak = 0;
+        int samples = 30;
         
-        for (int i = 0; i < SOUND_BASELINE_SAMPLES; i++) {
-            sum += analogRead(MIC_PIN);
-            samples++;
+        for (int i = 0; i < samples; i++) {
+            // Measure average
+            int val = analogRead(MIC_PIN);
+            sumAvg += val;
+            
+            // Measure peak-to-peak variation
+            int minVal = 1023, maxVal = 0;
+            for (int j = 0; j < 10; j++) {
+                int reading = analogRead(MIC_PIN);
+                if (reading < minVal) minVal = reading;
+                if (reading > maxVal) maxVal = reading;
+                delayMicroseconds(100);
+            }
+            sumPeak += (maxVal - minVal);
+            
             delay(100);
             
             if (i % 10 == 0) {
                 Serial.print("🎤 Calibrating... ");
-                Serial.print((i * 100) / SOUND_BASELINE_SAMPLES);
+                Serial.print((i * 100) / samples);
                 Serial.println("%");
             }
         }
         
-        baselineValue = sum / samples;
+        baselineValue = sumAvg / samples;
+        baselinePeakToPeak = sumPeak / samples;
+        smoothedValue = 0.0f;
         isCalibrated = true;
         
-        Serial.print("🎤 Baseline calibrated: ");
+        Serial.print("🎤 Baseline (average): ");
         Serial.print(baselineValue);
-        Serial.println(" units");
-        Serial.println("🎤 Sound sensor ready!");
+        Serial.print(" | Natural variation: ");
+        Serial.println(baselinePeakToPeak);
+        Serial.println("🎤 Sound sensor ready! (Quiet room should read 0-10)");
     }
     
-    // Get calibrated sound level (0 = silence, positive = sound detected)
+    // Get calibrated sound level - sensitive to distant sounds
     int getCalibratedSoundLevel() {
         if (!isCalibrated) {
-            return analogRead(MIC_PIN); // Return raw value if not calibrated
+            return analogRead(MIC_PIN);
         }
         
-        int rawValue = analogRead(MIC_PIN);
-        int calibratedValue = rawValue - baselineValue;
+        // Method 1: Average reading (for loud sounds)
+        int rawAvg = analogRead(MIC_PIN);
+        int avgDiff = abs(rawAvg - baselineValue);
         
-        // Only return positive values (sound above baseline)
-        return (calibratedValue > 0) ? calibratedValue : 0;
+        // Method 2: Peak-to-peak (for distant sounds - more sensitive)
+        int minVal = 1023, maxVal = 0;
+        for (int i = 0; i < 15; i++) {
+            int reading = analogRead(MIC_PIN);
+            if (reading < minVal) minVal = reading;
+            if (reading > maxVal) maxVal = reading;
+            delayMicroseconds(100);
+        }
+        int peakToPeak = maxVal - minVal;
+        
+        // Subtract natural variation
+        int relativePeak = peakToPeak - baselinePeakToPeak;
+        if (relativePeak < 0) relativePeak = 0;
+        
+        // Amplify variations for sensitivity to distant sounds
+        int amplifiedPeak = (int)(relativePeak * SENSITIVITY);
+        
+        // Combine: use larger of the two methods
+        int combined = (avgDiff > amplifiedPeak) ? avgDiff : amplifiedPeak;
+        
+        // Apply smoothing for stability
+        smoothedValue = SMOOTHING * smoothedValue + (1.0f - SMOOTHING) * combined;
+        
+        return (int)smoothedValue;
     }
     
     bool isReady() {
@@ -303,6 +368,7 @@ struct MotionData {
     float accelX, accelY, accelZ;    // m/s²
     float gyroX, gyroY, gyroZ;       // degrees/s
     float motionMagnitude;            // Overall motion level
+    float xAngle, yAngle, zAngle;    // Orientation angles (degrees) - matches phone display
     bool isMoving;                    // Motion detection flag
     bool sensorWorking;               // Sensor status flag
 };
@@ -310,6 +376,13 @@ struct MotionData {
 class LSM6DS3_Direct {
 private:
     uint8_t address;
+    
+    // Orientation angles (complementary filter state)
+    float pitch = 0.0f;   // Y-axis rotation (yAngle)
+    float roll = 0.0f;    // X-axis rotation (xAngle)
+    float yaw = 0.0f;     // Z-axis rotation (zAngle)
+    unsigned long lastAngleUpdate = 0;
+    const float ALPHA = 0.98f;  // Complementary filter coefficient (98% gyro, 2% accel)
     
 public:
     LSM6DS3_Direct(uint8_t addr = 0x6A) : address(addr) {}
@@ -517,6 +590,53 @@ public:
         
         // Motion detection (now properly calibrated)
         motion.isMoving = (motion.motionMagnitude > 0.1f);
+        
+        // Calculate orientation angles (matching phone display format)
+        // Using complementary filter: accelerometer for long-term accuracy, gyro for responsiveness
+        unsigned long currentAngleTime = millis();
+        float dt = 0.0f;
+        
+        if (lastAngleUpdate > 0) {
+            dt = (currentAngleTime - lastAngleUpdate) / 1000.0f;  // Convert to seconds
+        } else {
+            dt = 0.01f;  // Default 10ms for first reading
+        }
+        lastAngleUpdate = currentAngleTime;
+        
+        // Calculate angles from accelerometer (when device is relatively still)
+        // Convert accelerometer from m/s² to g
+        float ax_g = motion.accelX / 9.81f;
+        float ay_g = motion.accelY / 9.81f;
+        float az_g = motion.accelZ / 9.81f;
+        
+        // Calculate accelerometer-based angles (in degrees)
+        // Roll (rotation around X-axis) = xAngle
+        float accelRoll = atan2(ay_g, az_g) * 180.0f / 3.14159265f;
+        
+        // Pitch (rotation around Y-axis) = yAngle
+        float accelPitch = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0f / 3.14159265f;
+        
+        // Yaw (rotation around Z-axis) = zAngle (approximate from accelerometer)
+        float accelYaw = atan2(ay_g, ax_g) * 180.0f / 3.14159265f;
+        
+        // Integrate gyroscope to get angle change
+        if (dt > 0 && dt < 1.0f) {  // Valid time delta (avoid huge jumps)
+            // Update angles using complementary filter
+            // ALPHA = 0.98 means 98% gyro (responsive), 2% accelerometer (stable)
+            pitch = ALPHA * (pitch + motion.gyroY * dt) + (1.0f - ALPHA) * accelPitch;
+            roll = ALPHA * (roll + motion.gyroX * dt) + (1.0f - ALPHA) * accelRoll;
+            yaw = ALPHA * (yaw + motion.gyroZ * dt) + (1.0f - ALPHA) * accelYaw;
+        } else {
+            // First reading or invalid dt - use accelerometer directly
+            pitch = accelPitch;
+            roll = accelRoll;
+            yaw = accelYaw;
+        }
+        
+        // Store angles in motion structure (matching phone display: x-angle, y-angle, z-angle)
+        motion.xAngle = roll;   // X-axis rotation
+        motion.yAngle = pitch;  // Y-axis rotation
+        motion.zAngle = yaw;    // Z-axis rotation
         
         // Set sensor working flag
         motion.sensorWorking = true;
@@ -793,21 +913,29 @@ public:
 IntelligentSensorMonitor sensorMonitor;
 
 // ============================================================================
+// FIREBASE CLIENT (Using MXChipFirebase Library)
+// ============================================================================
+
+// Global Firebase client instance
+MXChipFirebase firebaseClient;
+
+// ============================================================================
 // CLEAN, HUMAN-READABLE DISPLAY SYSTEM
 // ============================================================================
 
 // Display Settings
-#define DISPLAY_INTERVAL_MS 5000        // Show data every 5 seconds
-#define AVERAGE_WINDOW_MS 30000         // Average over 30 seconds
-#define SIGNIFICANT_CHANGE_TEMP 1.0     // 1°C change
-#define SIGNIFICANT_CHANGE_HUM 3.0      // 3% change
-#define SIGNIFICANT_CHANGE_MOTION 0.2   // 0.2 m/s² change (gravity-corrected)
-#define SIGNIFICANT_CHANGE_SOUND 5      // 5 unit change (calibrated)
+#define DISPLAY_INTERVAL_MS 1000        // Update values every 1 second
+#define AVERAGE_WINDOW_MS 2000           // Average over 2 seconds for display
+#define SIGNIFICANT_CHANGE_TEMP 0.1     // 0.1°C change (very sensitive)
+#define SIGNIFICANT_CHANGE_HUM 0.5      // 0.5% change (very sensitive)
+#define SIGNIFICANT_CHANGE_MOTION 0.05  // 0.05 m/s² change (very sensitive)
+#define SIGNIFICANT_CHANGE_SOUND 1      // 1 unit change (very sensitive)
 
 class CleanDisplay {
 private:
     unsigned long lastDisplay;
     unsigned long lastDataCollection;
+    bool headerPrinted;
     
     // Running averages
     float tempSum, humSum, motionSum, soundSum;
@@ -820,6 +948,7 @@ public:
     CleanDisplay() {
         lastDisplay = 0;
         lastDataCollection = 0;
+        headerPrinted = false;
         tempSum = humSum = motionSum = soundSum = 0;
         sampleCount = 0;
         lastTemp = lastHum = lastMotion = lastSound = -999;
@@ -828,8 +957,8 @@ public:
     void addData(float temp, float hum, float motion, float sound) {
         unsigned long now = millis();
         
-        // Collect data every second
-        if (now - lastDataCollection >= 1000) {
+        // Collect data every 500ms for better real-time accuracy
+        if (now - lastDataCollection >= 500) {
             tempSum += temp;
             humSum += hum;
             motionSum += motion;
@@ -842,7 +971,7 @@ public:
     void display() {
         unsigned long now = millis();
         
-        // Only display every 5 seconds
+        // Update values every second
         if (now - lastDisplay >= DISPLAY_INTERVAL_MS) {
             
             // Calculate averages
@@ -851,146 +980,60 @@ public:
             float avgMotion = (sampleCount > 0) ? motionSum / sampleCount : 0;
             float avgSound = (sampleCount > 0) ? soundSum / sampleCount : 0;
             
-            // Check for significant changes
-            bool tempChanged = abs(avgTemp - lastTemp) >= SIGNIFICANT_CHANGE_TEMP;
-            bool humChanged = abs(avgHum - lastHum) >= SIGNIFICANT_CHANGE_HUM;
-            bool motionChanged = abs(avgMotion - lastMotion) >= SIGNIFICANT_CHANGE_MOTION;
-            bool soundChanged = abs(avgSound - lastSound) >= SIGNIFICANT_CHANGE_SOUND;
+            // Print header only once
+            if (!headerPrinted) {
+                Serial.println();
+                Serial.println("═══════════════════════════════════════════════════════════════");
+                Serial.println("          MENTAL HEALTH MONITOR - REAL-TIME SENSOR DATA");
+                Serial.println("═══════════════════════════════════════════════════════════════");
+                Serial.println();
+                Serial.println("CURRENT READINGS:");
+                Serial.println("───────────────────────────────────────────────────────────────");
+                headerPrinted = true;
+            }
             
-            // Clear screen with separator
-            Serial.println();
-            Serial.println("╔══════════════════════════════════════════════════════════════╗");
-            Serial.println("║                    MENTAL HEALTH MONITOR                    ║");
-            Serial.println("║                    Real-Time Sensor Data                    ║");
-            Serial.println("╚══════════════════════════════════════════════════════════════╝");
+            // Update each line in place using carriage return (static labels, dynamic values)
+            // Temperature - overwrite the line
+            Serial.print("\rTemperature: ");
+            Serial.print(avgTemp, 2);
+            Serial.print("°C                    ");  // Pad to clear old text
             
-            // Display timestamp and calibration info
-            Serial.print("🕐 Time: ");
-            Serial.print(now / 1000);
-            Serial.println(" seconds | Sample Count: " + String(sampleCount));
-            Serial.print("🎤 Sound Baseline: ");
-            Serial.print(soundCalibrator.getBaseline());
-            Serial.println(" units | 📱 Motion: Gravity-corrected");
-            Serial.println();
-            
-            // Display sensor data with clear formatting
-            Serial.println("📊 SENSOR READINGS (30-second averages):");
-            Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            
-            // Temperature
-            Serial.print("🌡️  Temperature: ");
-            Serial.print(avgTemp, 1);
-            Serial.print("°C");
-            if (tempChanged) Serial.print(" ⚡ CHANGED");
-            Serial.println();
-            
-            // Humidity
-            Serial.print("💧 Humidity:    ");
-            Serial.print(avgHum, 1);
-            Serial.print("%");
-            if (humChanged) Serial.print(" ⚡ CHANGED");
-            Serial.println();
+            // Humidity - move to next line and overwrite
+            Serial.print("\nHumidity:    ");
+            Serial.print(avgHum, 2);
+            Serial.print("%                    ");
             
             // Motion
-            Serial.print("📱 Motion:      ");
-            Serial.print(avgMotion, 2);
-            Serial.print(" m/s²");
-            if (motionChanged) Serial.print(" ⚡ CHANGED");
-            Serial.println();
+            Serial.print("\nMotion:      ");
+            Serial.print(avgMotion, 3);
+            Serial.print(" m/s²                  ");
+            
+            // Angles (if motion sensor is working)
+            extern MotionData motion;
+            if (motion.sensorWorking) {
+                Serial.print("\nAngles:      X=");
+                Serial.print(motion.xAngle, 1);
+                Serial.print("° Y=");
+                Serial.print(motion.yAngle, 1);
+                Serial.print("° Z=");
+                Serial.print(motion.zAngle, 1);
+                Serial.print("°                    ");
+            }
             
             // Sound
-            Serial.print("🎤 Sound:       ");
-            Serial.print(avgSound);
-            Serial.print(" units");
-            if (soundChanged) Serial.print(" ⚡ CHANGED");
-            Serial.println();
+            Serial.print("\nSound:       ");
+            Serial.print(avgSound, 1);
+            Serial.print(" units                  ");
             
-            Serial.println();
-            
-            // Display status summary
-            Serial.println("📋 STATUS SUMMARY:");
-            Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            
-            // Temperature status
-            if (avgTemp >= 18 && avgTemp <= 26) {
-                Serial.println("🌡️  Temperature: ✅ COMFORTABLE");
-            } else if (avgTemp > 26 && avgTemp <= 30) {
-                Serial.println("🌡️  Temperature: ⚠️  UNCOMFORTABLE");
-            } else if (avgTemp > 30) {
-                Serial.println("🌡️  Temperature: 🚨 DANGEROUS!");
-            } else {
-                Serial.println("🌡️  Temperature: ❓ UNKNOWN");
-            }
-            
-            // Humidity status
-            if (avgHum >= 30 && avgHum <= 70) {
-                Serial.println("💧 Humidity:    ✅ COMFORTABLE");
-            } else if (avgHum > 70 && avgHum <= 85) {
-                Serial.println("💧 Humidity:    ⚠️  UNCOMFORTABLE");
-            } else if (avgHum > 85) {
-                Serial.println("💧 Humidity:    🚨 DANGEROUS!");
-            } else {
-                Serial.println("💧 Humidity:    ❓ UNKNOWN");
-            }
-            
-            // Motion status (gravity-corrected)
-            if (avgMotion <= MOTION_CALM_MAX) {
-                Serial.println("📱 Motion:      ✅ CALM");
-            } else if (avgMotion <= MOTION_NORMAL_MAX) {
-                Serial.println("📱 Motion:      ✅ NORMAL");
-            } else if (avgMotion <= MOTION_ACTIVE_MAX) {
-                Serial.println("📱 Motion:      ⚠️  ACTIVE");
-            } else {
-                Serial.println("📱 Motion:      🚨 VIOLENT!");
-            }
-            
-            // Sound status (calibrated)
-            if (avgSound <= SOUND_SILENCE_MAX) {
-                Serial.println("🎤 Sound:       ✅ SILENCE");
-            } else if (avgSound <= SOUND_LOW_MAX) {
-                Serial.println("🎤 Sound:       ✅ LOW");
-            } else if (avgSound <= SOUND_MEDIUM_MAX) {
-                Serial.println("🎤 Sound:       ⚠️  MEDIUM");
-            } else if (avgSound <= SOUND_HIGH_MAX) {
-                Serial.println("🎤 Sound:       ⚠️  HIGH");
-            } else {
-                Serial.println("🎤 Sound:       🚨 DANGEROUS!");
-            }
-            
-            Serial.println();
-            
-            // Overall health assessment
-            Serial.println("🏥 OVERALL HEALTH ASSESSMENT:");
-            Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            
-            int alertCount = 0;
-            if (avgTemp > 30 || avgHum > 85) alertCount += 2;
-            if (avgMotion > MOTION_ACTIVE_MAX) alertCount += 1;
-            if (avgSound > SOUND_HIGH_MAX) alertCount += 1;
-            
-            if (alertCount == 0) {
-                Serial.println("✅ ALL SYSTEMS NORMAL - Patient is comfortable");
-            } else if (alertCount == 1) {
-                Serial.println("⚠️  MINOR WARNING - Some parameters need attention");
-            } else if (alertCount == 2) {
-                Serial.println("🚨 ALERT - Multiple parameters concerning");
-            } else {
-                Serial.println("🚨 CRITICAL - Immediate attention required!");
-            }
-            
-            Serial.println();
-            Serial.println("╔══════════════════════════════════════════════════════════════╗");
-            Serial.println("║                    END OF REPORT                           ║");
-            Serial.println("╚══════════════════════════════════════════════════════════════╝");
-            Serial.println();
-            
-            // Reset for next cycle
-            tempSum = humSum = motionSum = soundSum = 0;
-            sampleCount = 0;
+            // Update last values
             lastTemp = avgTemp;
             lastHum = avgHum;
             lastMotion = avgMotion;
             lastSound = avgSound;
+            
+            // Reset for next cycle
+            tempSum = humSum = motionSum = soundSum = 0;
+            sampleCount = 0;
             lastDisplay = now;
         }
     }
@@ -1077,6 +1120,61 @@ void setup() {
     Serial.println(soundCalibrator.isReady() ? "✅ CALIBRATED" : "❌ FAILED");
     Serial.println("============================================================");
     
+    // Initialize WiFi using AZ3166 WiFi libraries
+    Serial.println();
+    Serial.println("============================================================");
+    Serial.println("INITIALIZING WiFi CONNECTION...");
+    Serial.println("============================================================");
+    Serial.print("Connecting to WiFi: ");
+    Serial.println(WIFI_SSID);
+    
+    // Initialize WiFi using standard WiFi class (from AZ3166WiFi.h)
+    if (WiFi.begin(WIFI_SSID, WIFI_PASSWORD) != WL_CONNECTED) {
+        Serial.println("Connecting to WiFi...");
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500);
+            Serial.print(".");
+            attempts++;
+        }
+        Serial.println();
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("✅ WiFi Connected!");
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.localIP());
+        Serial.print("Signal Strength (RSSI): ");
+        Serial.print(WiFi.RSSI());
+        Serial.println(" dBm");
+        
+        // Initialize Firebase client
+        Serial.println();
+        Serial.println("============================================================");
+        Serial.println("INITIALIZING FIREBASE CONNECTION...");
+        Serial.println("============================================================");
+        firebaseClient.setDebugMode(true);
+        firebaseClient.setPath(PROXY_ENDPOINT);
+        firebaseClient.setDeviceId(DEVICE_ID);
+        firebaseClient.setUpdateInterval(FIREBASE_UPDATE_INTERVAL_MS);
+        
+        if (firebaseClient.begin(PROXY_SERVER_IP, PROXY_SERVER_PORT)) {
+            Serial.println("✅ Firebase client initialized");
+            Serial.print("Proxy Server: ");
+            Serial.print(PROXY_SERVER_IP);
+            Serial.print(":");
+            Serial.println(PROXY_SERVER_PORT);
+        } else {
+            Serial.println("❌ Firebase client initialization failed");
+            Serial.print("Error: ");
+            Serial.println(firebaseClient.getLastError());
+        }
+    } else {
+        Serial.println("❌ WiFi Connection Failed!");
+        Serial.println("System will continue but data won't be sent to Firebase.");
+    }
+    Serial.println("============================================================");
+    
     if (!hts221_ok && !lsm6ds3_ok) {
         Serial.println("ERROR: No sensors working! Check hardware connections.");
     while(1);
@@ -1086,10 +1184,12 @@ void setup() {
     Serial.println("============================================================");
 }
 
+// Global motion data for angle display
+MotionData motion;
+
 void loop() {
     // Read sensor data
     float temperature = 0.0f, humidity = 0.0f;
-    MotionData motion;
     motion.sensorWorking = false; // Default to false
     
     // Read HTS221 (temperature & humidity)
@@ -1112,6 +1212,9 @@ void loop() {
         motion.gyroY = 0.0f;
         motion.gyroZ = 0.0f;
         motion.motionMagnitude = 0.0f; // No motion (gravity-corrected)
+        motion.xAngle = 0.0f;
+        motion.yAngle = 0.0f;
+        motion.zAngle = 0.0f;
         motion.isMoving = false;
         motion.sensorWorking = false;
     }
@@ -1124,6 +1227,26 @@ void loop() {
     
     // Display clean report every 5 seconds
     cleanDisplay.display();
+    
+    // Send data to Firebase if WiFi is connected
+    if (WiFi.status() == WL_CONNECTED && firebaseClient.isConnected()) {
+        firebaseClient.sendSensorData(
+            DEVICE_ID,
+            temperature, 
+            humidity, 
+            motion.motionMagnitude,
+            micValue,
+            motion.accelX,
+            motion.accelY,
+            motion.accelZ,
+            motion.gyroX,
+            motion.gyroY,
+            motion.gyroZ,
+            motion.xAngle,
+            motion.yAngle,
+            motion.zAngle
+        );
+    }
     
     // Simple delay
     delay(1000);

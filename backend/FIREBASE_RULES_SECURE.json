@@ -1,0 +1,29 @@
+{
+  "rules": {
+    "devices": {
+      "$deviceId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "current": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        },
+        "history": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    },
+    "baselines": {
+      "$userId": {
+        ".read": "auth != null && auth.uid == $userId",
+        ".write": "auth != null && auth.uid == $userId"
+      }
+    },
+    "alerts": {
+      ".read": "auth != null",
+      ".write": false
+    }
+  }
+}
+
