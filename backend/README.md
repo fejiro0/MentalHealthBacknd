@@ -51,18 +51,15 @@ To find your IP address:
 
 ## Firebase Security Rules
 
-Make sure your Firebase Realtime Database rules allow writes:
+Firebase security rules are provided in `firebase-rules.json`. 
 
-```json
-{
-  "rules": {
-    ".read": true,
-    ".write": true
-  }
-}
-```
+To apply these rules:
+1. Go to Firebase Console > Realtime Database > Rules
+2. Copy the contents of `firebase-rules.json`
+3. Paste into the Firebase Rules editor
+4. Click "Publish"
 
-**Note:** For production, you should use proper authentication and stricter rules!
+**Note:** The rules require authentication (`auth != null`). Make sure anonymous authentication is enabled in Firebase Authentication settings.
 
 ## Testing
 
