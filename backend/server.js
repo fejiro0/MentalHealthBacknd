@@ -3,6 +3,9 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const fs = require('fs');
+let admin = null;
+let adminInitialized = false;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -73,6 +76,35 @@ authenticateAnonymously().then(token => {
 }).catch(err => {
     console.warn('⚠️  Auth initialization error (non-critical):', err.message);
 });
+
+// Optional: initialize Firebase Admin SDK if service account is provided
+try {
+    // Detect service account via env var or local file
+    const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './serviceAccountKey.json';
+    if (fs.existsSync(serviceAccountPath)) {
+        admin = require('firebase-admin');
+        const serviceAccount = require(serviceAccountPath);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            databaseURL: FIREBASE_URL
+        });
+        adminInitialized = true;
+        console.log('✅ Firebase Admin SDK initialized using', serviceAccountPath);
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        // If env var set but file doesn't exist, try application default credentials
+        admin = require('firebase-admin');
+        admin.initializeApp({
+            credential: admin.credential.applicationDefault(),
+            databaseURL: FIREBASE_URL
+        });
+        adminInitialized = true;
+        console.log('✅ Firebase Admin SDK initialized using application default credentials');
+    } else {
+        console.log('ℹ️  Firebase Admin SDK not initialized (no service account).');
+    }
+} catch (err) {
+    console.warn('⚠️  Could not initialize Firebase Admin SDK:', err.message);
+}
 
 console.log('Server configuration:', {
     FIREBASE_URL,
@@ -145,36 +177,43 @@ app.post('/sensor-data', async (req, res) => {
         }
         
         console.log('Sending to Firebase URL:', firebaseUrl.replace(authToken || '', '***'));
-        
-        // Forward the data to Firebase using PUT (updates the current reading)
-        const response = await axios({
-            method: 'PUT',
-            url: firebaseUrl,
-            data: firebaseData,
-            headers: {
-                'Content-Type': 'application/json'
+
+        if (adminInitialized && admin) {
+            // Use Admin SDK for privileged writes (bypasses DB rules)
+            await admin.database().ref(`devices/${deviceId}/current`).set(firebaseData);
+            await admin.database().ref(`devices/${deviceId}/history/${timestamp}`).set(firebaseData);
+            console.log('Firebase Admin SDK write: OK');
+        } else {
+            // Forward the data to Firebase using REST PUT (updates the current reading)
+            const response = await axios({
+                method: 'PUT',
+                url: firebaseUrl,
+                data: firebaseData,
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            console.log('Firebase response:', response.status, response.statusText);
+
+            // Also store historical data (append to history)
+            const historyPath = `/devices/${deviceId}/history/${timestamp}.json`;
+            let historyUrl = `${FIREBASE_URL}${historyPath}`;
+            
+            // Add auth token if available
+            if (authToken) {
+                historyUrl += `?auth=${authToken}`;
             }
-        });
-
-        console.log('Firebase response:', response.status, response.statusText);
-
-        // Also store historical data (append to history)
-        const historyPath = `/devices/${deviceId}/history/${timestamp}.json`;
-        let historyUrl = `${FIREBASE_URL}${historyPath}`;
-        
-        // Add auth token if available
-        if (authToken) {
-            historyUrl += `?auth=${authToken}`;
+            
+            await axios({
+                method: 'PUT',
+                url: historyUrl,
+                data: firebaseData,
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
         }
-        
-        await axios({
-            method: 'PUT',
-            url: historyUrl,
-            data: firebaseData,
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
 
         res.json({
             success: true,
@@ -225,18 +264,22 @@ app.get('/test-firebase', async (req, res) => {
         
         // Firebase Realtime Database uses database rules, not API key auth
         const testUrl = `${FIREBASE_URL}/test.json`;
-        
-        const response = await axios({
-            method: 'PUT',
-            url: testUrl,
-            data: testData
-        });
+        if (adminInitialized && admin) {
+            await admin.database().ref('test').set(testData);
+            res.json({ success: true, message: 'Firebase Admin SDK test successful' });
+        } else {
+            const response = await axios({
+                method: 'PUT',
+                url: testUrl,
+                data: testData
+            });
 
-        res.json({
-            success: true,
-            message: 'Firebase connection test successful',
-            data: response.data
-        });
+            res.json({
+                success: true,
+                message: 'Firebase connection test successful',
+                data: response.data
+            });
+        }
     } catch (error) {
         res.status(500).json({
             success: false,

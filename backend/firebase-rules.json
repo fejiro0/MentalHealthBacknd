@@ -1,17 +1,19 @@
 {
   "rules": {
     "devices": {
+      ".read": true,
+      ".write": true,
       "$deviceId": {
-        ".read": "auth != null",
-        ".write": "auth != null",
+        ".read": true,
+        ".write": true,
         "current": {
-          ".read": "auth != null",
-          ".write": "auth != null"
+          ".read": true,
+          ".write": true
         },
         "history": {
           "$timestamp": {
-            ".read": "auth != null",
-            ".write": "auth != null"
+            ".read": true,
+            ".write": true
           }
         }
       }
@@ -23,12 +25,12 @@
       }
     },
     "alerts": {
-      ".read": "auth != null",
+      ".read": true,
       ".write": false
     },
     "test": {
-      ".read": "auth != null",
-      ".write": "auth != null"
+      ".read": true,
+      ".write": true
     }
   }
 }

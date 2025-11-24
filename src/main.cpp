@@ -93,21 +93,36 @@
 #define SOUND_BASELINE_SAMPLES 50    // Samples to take for baseline calibration
 #define SOUND_BASELINE_THRESHOLD 5   // Minimum change from baseline to register as sound
 
-// Configuration - Create src/config.h with your actual values
-// See src/config.h.example for template
-#ifdef CONFIG_H
+// Configuration - prefer project `src/config.h` but provide safe defaults
+// Copy `src/config.h.example` -> `src/config.h` and fill your values.
 #include "config.h"
-#else
-// Default placeholder values - REPLACE WITH YOUR ACTUAL VALUES
-// Copy src/config.h.example to src/config.h and fill in your credentials
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-#define PROXY_SERVER_IP "192.168.1.100"  // Your computer's IP address
+
+// Ensure defaults exist if `config.h` didn't define them
+#ifndef WIFI_SSID
+#define WIFI_SSID "AZUSPROG 0814"
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD "12345679"
+#endif
+#ifndef PROXY_SERVER_IP
+#define PROXY_SERVER_IP "192.168.1.100"
+#endif
+#ifndef PROXY_SERVER_PORT
 #define PROXY_SERVER_PORT 3000
+#endif
+#ifndef PROXY_ENDPOINT
 #define PROXY_ENDPOINT "/sensor-data"
+#endif
+#ifndef FIREBASE_HOST
 #define FIREBASE_HOST "your-project-default-rtdb.firebaseio.com"
+#endif
+#ifndef FIREBASE_PROJECT_ID
 #define FIREBASE_PROJECT_ID "your-project-id"
+#endif
+#ifndef DEVICE_ID
 #define DEVICE_ID "MXCHIP_001"
+#endif
+#ifndef FIREBASE_UPDATE_INTERVAL_MS
 #define FIREBASE_UPDATE_INTERVAL_MS 2000
 #endif
 
