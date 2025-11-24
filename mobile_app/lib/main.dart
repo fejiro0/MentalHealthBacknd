@@ -80,7 +80,8 @@ class MyApp extends StatelessWidget {
         Provider<AuthService>(create: (_) => AuthService()),
         Provider<FirebaseService>(create: (_) => FirebaseService()),
         Provider<BaselineService>(create: (_) => BaselineService()),
-        Provider<BaselineRecordingService>(create: (_) => BaselineRecordingService()),
+        Provider<BaselineRecordingService>(
+            create: (_) => BaselineRecordingService()),
         Provider<DeviceService>(create: (_) => DeviceService()),
         Provider<EventService>(create: (_) => EventService()),
         Provider<FallDetectionService>(
@@ -89,7 +90,11 @@ class MyApp extends StatelessWidget {
             Provider.of<NotificationService>(_, listen: false),
           ),
         ),
-        Provider<FeelingGoodService>(create: (_) => FeelingGoodService()),
+        Provider<FeelingGoodService>(
+          create: (_) => FeelingGoodService(
+            Provider.of<EventService>(_, listen: false),
+          ),
+        ),
       ]);
     }
 

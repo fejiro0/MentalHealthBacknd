@@ -5,7 +5,7 @@ MXChipFirebase::MXChipFirebase() {
     connected = false;
     debugMode = false;
     host = "192.168.1.100";  // Default proxy server IP (update to your computer's IP)
-    port = 8081;              // Default proxy server port
+    port = 3000;              // Default proxy server port
     path = "/sensor-data";
     deviceId = "MXCHIP_001";
     lastSendTime = 0;
@@ -16,46 +16,13 @@ MXChipFirebase::MXChipFirebase() {
 bool MXChipFirebase::begin(const char* host, int port) {
     this->host = host;
     this->port = port;
-    
-    // Check if WiFi is connected first
-    if (WiFi.status() != WL_CONNECTED) {
-        connected = false;
-        strcpy(lastError, "WiFi not connected");
-        if (debugMode) {
-            Serial.println("❌ WiFi not connected");
-        }
-        return false;
-    }
-    
-    // Try to establish a test connection to verify proxy server is reachable
+    connected = (WiFi.status() == WL_CONNECTED);  // Check if WiFi is connected
     if (debugMode) {
-        Serial.print("Testing connection to proxy server: ");
+        Serial.print("MXChipFirebase initialized: ");
         Serial.print(host);
         Serial.print(":");
         Serial.println(port);
     }
-    
-    WiFiClient testClient;
-    if (testClient.connect(host, port)) {
-        connected = true;
-        testClient.stop();
-        if (debugMode) {
-            Serial.print("✅ MXChipFirebase initialized: ");
-            Serial.print(host);
-            Serial.print(":");
-            Serial.println(port);
-        }
-    } else {
-        connected = false;
-        strcpy(lastError, "Cannot reach proxy server");
-        if (debugMode) {
-            Serial.print("❌ Cannot reach proxy server: ");
-            Serial.print(host);
-            Serial.print(":");
-            Serial.println(port);
-        }
-    }
-    
     return connected;
 }
 
