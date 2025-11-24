@@ -85,14 +85,14 @@ Create a Node.js server that accepts HTTP from MXChip and forwards to Firebase v
      }
    });
 
-   app.listen(3000, () => {
-     console.log('Proxy server running on http://localhost:3000');
+   app.listen(8081, () => {
+     console.log('Proxy server running on http://localhost:8081');
    });
    ```
 
 3. **Update MXChip code to use proxy:**
    - Change `FIREBASE_HOST` to your computer's IP address (e.g., `192.168.1.100`)
-   - Change port from 443 to 3000
+   - Change port from 443 to 8081
    - Use HTTP (port 80) instead of HTTPS
 
 ### Option 2: Use WiFiClientSecure (If Available)

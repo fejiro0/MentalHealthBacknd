@@ -18,6 +18,24 @@
         }
       }
     },
+    "emotional_states": {
+      ".read": true,
+      ".write": true,
+      "$userId": {
+        ".read": true,
+        ".write": true,
+        "current": {
+          ".read": true,
+          ".write": true
+        },
+        "history": {
+          "$timestamp": {
+            ".read": true,
+            ".write": true
+          }
+        }
+      }
+    },
     "baselines": {
       "$userId": {
         ".read": "auth != null && auth.uid == $userId",

@@ -8,7 +8,7 @@ let admin = null;
 let adminInitialized = false;
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8081;
 
 // Middleware
 app.use(cors());
@@ -42,6 +42,7 @@ let authToken = null;
 async function authenticateAnonymously() {
     if (!API_KEY) {
         console.warn('⚠️  API_KEY not set - skipping anonymous authentication');
+        console.warn('   Firebase rules allow writes, but auth token helps with security');
         return null;
     }
 
@@ -54,12 +55,14 @@ async function authenticateAnonymously() {
         authToken = response.data.idToken;
         console.log('✅ Anonymous authentication successful!');
         console.log('   User ID:', response.data.localId);
+        console.log('   Auth Token:', authToken.substring(0, 20) + '...');
         return authToken;
     } catch (error) {
         const errorDetails = error.response?.data || error.message;
         console.error('❌ Anonymous authentication failed:', JSON.stringify(errorDetails, null, 2));
-        console.warn('⚠️  Continuing without auth token - will use database rules');
-        console.warn('   Make sure Firebase Realtime Database rules allow writes');
+        console.warn('⚠️  Continuing without auth token');
+        console.warn('   Firebase rules currently allow writes without auth');
+        console.warn('   If writes fail, check Firebase rules in firebase-rules.json');
         return null;
     }
 }
@@ -135,9 +138,18 @@ app.post('/sensor-data', async (req, res) => {
         const sound = parseInt(req.body.sound) || 0;
 
         // Validate required fields
-        if (isNaN(temperature) || isNaN(humidity) || isNaN(timestamp)) {
-            throw new Error('Invalid data format: temperature, humidity, and timestamp are required');
+        if (isNaN(temperature) || isNaN(humidity)) {
+            console.error('❌ Invalid data - temperature:', temperature, 'humidity:', humidity);
+            throw new Error('Invalid data format: temperature and humidity are required');
         }
+        
+        console.log('✅ Received valid sensor data:', {
+            deviceId,
+            temperature,
+            humidity,
+            motionMagnitude,
+            timestamp
+        });
 
         // Structure data for Firebase
         const firebaseData = {
@@ -168,15 +180,19 @@ app.post('/sensor-data', async (req, res) => {
         console.log('Processed data:', firebaseData);
         
         // Construct Firebase path with authentication
+        // Ensure FIREBASE_URL doesn't have trailing slash
+        const baseUrl = FIREBASE_URL.endsWith('/') ? FIREBASE_URL.slice(0, -1) : FIREBASE_URL;
         const firebasePath = `/devices/${deviceId}/current.json`;
-        let firebaseUrl = `${FIREBASE_URL}${firebasePath}`;
+        let firebaseUrl = `${baseUrl}${firebasePath}`;
         
-        // Add auth token if available (for anonymous authentication)
+        // Try with auth token first, fallback to no auth if rules allow
         if (authToken) {
             firebaseUrl += `?auth=${authToken}`;
         }
         
         console.log('Sending to Firebase URL:', firebaseUrl.replace(authToken || '', '***'));
+        console.log('Firebase base URL:', baseUrl);
+        console.log('Device ID:', deviceId);
 
         if (adminInitialized && admin) {
             // Use Admin SDK for privileged writes (bypasses DB rules)
@@ -185,34 +201,83 @@ app.post('/sensor-data', async (req, res) => {
             console.log('Firebase Admin SDK write: OK');
         } else {
             // Forward the data to Firebase using REST PUT (updates the current reading)
-            const response = await axios({
-                method: 'PUT',
-                url: firebaseUrl,
-                data: firebaseData,
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
+            try {
+                console.log('Attempting Firebase PUT to:', firebaseUrl.replace(authToken || '', '***'));
+                const response = await axios({
+                    method: 'PUT',
+                    url: firebaseUrl,
+                    data: firebaseData,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    validateStatus: function (status) {
+                        return status < 500; // Don't throw on 4xx errors, we'll handle them
+                    }
+                });
 
-            console.log('Firebase response:', response.status, response.statusText);
+                if (response.status >= 200 && response.status < 300) {
+                    console.log('✅ Firebase write SUCCESS:', response.status, response.statusText);
+                    console.log('✅ Firebase response data:', JSON.stringify(response.data));
+                } else {
+                    // If auth failed, try without auth token (if rules allow)
+                    if (response.status === 401 && authToken) {
+                        console.warn('⚠️  Auth token failed (401), trying without auth token');
+                        const noAuthUrl = `${baseUrl}${firebasePath}`;
+                        console.log('Retrying Firebase PUT to:', noAuthUrl);
+                        const retryResponse = await axios({
+                            method: 'PUT',
+                            url: noAuthUrl,
+                            data: firebaseData,
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            validateStatus: () => true
+                        });
+                        
+                        if (retryResponse.status >= 200 && retryResponse.status < 300) {
+                            console.log('✅ Firebase write SUCCESS (no auth):', retryResponse.status);
+                        } else {
+                            console.error('❌ Firebase write FAILED (no auth):', retryResponse.status, JSON.stringify(retryResponse.data));
+                            throw new Error(`Firebase write failed: ${retryResponse.status} - ${JSON.stringify(retryResponse.data)}`);
+                        }
+                    } else {
+                        console.error('❌ Firebase write FAILED:', response.status, JSON.stringify(response.data));
+                        throw new Error(`Firebase returned ${response.status}: ${JSON.stringify(response.data)}`);
+                    }
+                }
+            } catch (firebaseError) {
+                console.error('❌ Firebase PUT error:', firebaseError.message);
+                if (firebaseError.response) {
+                    console.error('❌ Firebase error response:', firebaseError.response.status, firebaseError.response.statusText);
+                    console.error('❌ Firebase error data:', JSON.stringify(firebaseError.response.data));
+                }
+                throw firebaseError;
+            }
 
             // Also store historical data (append to history)
             const historyPath = `/devices/${deviceId}/history/${timestamp}.json`;
-            let historyUrl = `${FIREBASE_URL}${historyPath}`;
+            let historyUrl = `${baseUrl}${historyPath}`;
             
             // Add auth token if available
             if (authToken) {
                 historyUrl += `?auth=${authToken}`;
             }
             
-            await axios({
-                method: 'PUT',
-                url: historyUrl,
-                data: firebaseData,
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
+            try {
+                console.log('Attempting Firebase history PUT to:', historyUrl.replace(authToken || '', '***'));
+                await axios({
+                    method: 'PUT',
+                    url: historyUrl,
+                    data: firebaseData,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                console.log('✅ Firebase history write: OK');
+            } catch (historyError) {
+                console.error('❌ Firebase history write error:', historyError.message);
+                // Don't throw - history write failure shouldn't block current write
+            }
         }
 
         res.json({
@@ -263,22 +328,37 @@ app.get('/test-firebase', async (req, res) => {
         };
         
         // Firebase Realtime Database uses database rules, not API key auth
-        const testUrl = `${FIREBASE_URL}/test.json`;
+        const baseUrl = FIREBASE_URL.endsWith('/') ? FIREBASE_URL.slice(0, -1) : FIREBASE_URL;
+        const testUrl = `${baseUrl}/test.json`;
+        
         if (adminInitialized && admin) {
             await admin.database().ref('test').set(testData);
             res.json({ success: true, message: 'Firebase Admin SDK test successful' });
         } else {
-            const response = await axios({
-                method: 'PUT',
-                url: testUrl,
-                data: testData
-            });
+            let testUrlWithAuth = testUrl;
+            if (authToken) {
+                testUrlWithAuth += `?auth=${authToken}`;
+            }
+            
+            try {
+                const response = await axios({
+                    method: 'PUT',
+                    url: testUrlWithAuth,
+                    data: testData
+                });
 
-            res.json({
-                success: true,
-                message: 'Firebase connection test successful',
-                data: response.data
-            });
+                res.json({
+                    success: true,
+                    message: 'Firebase connection test successful',
+                    data: response.data
+                });
+            } catch (error) {
+                res.json({
+                    success: false,
+                    error: error.message,
+                    details: error.response?.data || 'No response data'
+                });
+            }
         }
     } catch (error) {
         res.status(500).json({

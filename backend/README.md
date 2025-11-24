@@ -16,7 +16,7 @@ This Node.js proxy server forwards sensor data from MXChip AZ3166 to Firebase Re
    
    Edit `.env` and set your configuration:
    ```env
-   PORT=3000
+   PORT=8081
    FIREBASE_DATABASE_URL=https://mental-healthmonitor-default-rtdb.firebaseio.com
    FIREBASE_API_KEY=your-api-key-here
    ```
@@ -65,17 +65,17 @@ To apply these rules:
 
 1. **Test server health:**
    ```bash
-   curl http://localhost:3000/health
+   curl http://localhost:8081/health
    ```
 
 2. **Test Firebase connection:**
    ```bash
-   curl http://localhost:3000/test-firebase
+   curl http://localhost:8081/test-firebase
    ```
 
 3. **Test with sample data:**
    ```bash
-   curl -X POST http://localhost:3000/sensor-data \
+   curl -X POST http://localhost:8081/sensor-data \
      -H "Content-Type: application/json" \
      -d '{
        "device_id": "MXCHIP_001",
@@ -89,7 +89,7 @@ To apply these rules:
 
 ## Troubleshooting
 
-- **Connection refused:** Check if server is running and firewall allows port 3000
+- **Connection refused:** Check if server is running and firewall allows port 8081
 - **Firebase errors:** Check API key and Firebase URL in `.env`
 - **CORS errors:** The server includes CORS headers, should work from any origin
 
