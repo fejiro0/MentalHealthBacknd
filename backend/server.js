@@ -307,7 +307,7 @@ app.listen(port, '0.0.0.0', () => {
     console.log(`  GET  /test-firebase - Test Firebase connection`);
     console.log(`═══════════════════════════════════════════════════════`);
     console.log(`\n📱 MXChip Configuration:`);
-    console.log(`   Update PROXY_SERVER_IP to your computer's IP address`);
+    console.log(`   Update PROXY_SERVER_HOST in MXChip firmware config to your host/domain or computer's IP address`);
     console.log(`   Find your IP: ipconfig (Windows) or ifconfig (Mac/Linux)`);
     console.log(`═══════════════════════════════════════════════════════`);
 });
