@@ -1,9 +1,12 @@
 #include "MXChipFirebase.h"
+#include "Wire.h"
+// WiFiClient is provided via AZ3166WiFi.h included in MXChipFirebase.h
 // WiFi class is available from AZ3166WiFi.h included in MXChipFirebase.h
 
 MXChipFirebase::MXChipFirebase() {
     connected = false;
     debugMode = false;
+    // secure flag removed: we always use WiFiClient
     host = "192.168.1.100";  // Default proxy server IP (update to your computer's IP)
     port = 3000;              // Default proxy server port
     path = "/sensor-data";
@@ -17,6 +20,7 @@ bool MXChipFirebase::begin(const char* host, int port) {
     this->host = host;
     this->port = port;
     connected = (WiFi.status() == WL_CONNECTED);  // Check if WiFi is connected
+    // do not set secure flag; always use WiFiClient
     if (debugMode) {
         Serial.print("MXChipFirebase initialized: ");
         Serial.print(host);
@@ -29,7 +33,8 @@ bool MXChipFirebase::begin(const char* host, int port) {
 bool MXChipFirebase::sendData(float temperature, float humidity) {
     if (!connected) return false;
 
-    if (client.connect(host, port)) {
+    // Removed secure flag usage
+        if (client.connect(host, port)) {
         // Create the JSON payload
         char payload[128];
         snprintf(payload, sizeof(payload), 
@@ -75,9 +80,13 @@ bool MXChipFirebase::sendData(float temperature, float humidity) {
             }
         }
         
-        client.stop();
-        return true;
-    }
+            client.stop();
+            return true;
+        }
+
+
+
+
     
     strcpy(lastError, "Failed to connect to server");
     return false;
@@ -89,85 +98,73 @@ bool MXChipFirebase::sendJSON(const char* jsonData) {
         return false;
     }
 
-    if (client.connect(host, port)) {
-        // Send HTTP POST request
-        char request[1200];
-        int contentLength = strlen(jsonData);
-        
-        snprintf(request, sizeof(request),
-                "POST %s HTTP/1.1\r\n"
-                "Host: %s:%d\r\n"
-                "Content-Type: application/json\r\n"
-                "Connection: close\r\n"
-                "Content-Length: %d\r\n"
-                "\r\n"
-                "%s",
-                path, host, port, contentLength, jsonData);
-        
+    if (!client.connect(host, port)) {
+        strcpy(lastError, "Failed to connect to server");
         if (debugMode) {
-            Serial.print("Connecting to proxy server... ");
+            Serial.print("Failed to connect to: ");
             Serial.print(host);
             Serial.print(":");
             Serial.println(port);
-            Serial.println("Sending JSON request:");
-            Serial.println(request);
         }
-        
-        client.print(request);
-
-        // Wait for response with timeout
-        unsigned long timeout = millis();
-        while (client.available() == 0) {
-            if (millis() - timeout > 5000) {
-                strcpy(lastError, "Client Timeout!");
-                if (debugMode) Serial.println(">>> Client Timeout!");
-                client.stop();
-                return false;
-            }
-            delay(10);
-        }
-
-        // Read response and check for success
-        bool success = false;
-        String response = "";
-        while (client.available()) {
-            char c = client.read();
-            response += c;
-            if (debugMode) {
-                Serial.write(c);
-            }
-        }
-        
-        // Check if response indicates success
-        if (response.indexOf("200 OK") >= 0 || response.indexOf("200") >= 0 || response.indexOf("success") >= 0) {
-            success = true;
-        }
-        
-        if (debugMode) {
-            if (success) {
-                Serial.println("Proxy: Data sent successfully to Firebase");
-            } else {
-                Serial.println("Proxy: Request sent but no success confirmation");
-            }
-        }
-        
-        client.stop();
-        
-        if (!success) {
-            strcpy(lastError, "No success confirmation from server");
-        }
-        
-        return success;
+        return false;
     }
-    
-    strcpy(lastError, "Failed to connect to server");
+
+    // Create and send the HTTP POST request
+    char request[1200];
+    int contentLength = strlen(jsonData);
+    snprintf(request, sizeof(request),
+            "POST %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Content-Type: application/json\r\n"
+            "Connection: close\r\n"
+            "Content-Length: %d\r\n"
+            "\r\n"
+            "%s",
+            path, host, contentLength, jsonData);
+
     if (debugMode) {
-        Serial.print("Failed to connect to: ");
+        Serial.print("Connecting to proxy server... ");
         Serial.print(host);
         Serial.print(":");
         Serial.println(port);
+        Serial.println("Sending JSON request:");
+        Serial.println(request);
     }
-    return false;
+    client.print(request);
+
+    // Wait for response with timeout
+    unsigned long timeout = millis();
+    while (client.available() == 0) {
+        if (millis() - timeout > 5000) {
+            strcpy(lastError, "Client Timeout!");
+            if (debugMode) Serial.println(">>> Client Timeout!");
+            client.stop();
+            return false;
+        }
+        delay(10);
+    }
+
+    // Read the response
+    bool success = false;
+    String response = "";
+    while (client.available()) {
+        char c = client.read();
+        response += c;
+        if (debugMode) Serial.write(c);
+    }
+
+    if (response.indexOf("200 OK") >= 0 || response.indexOf("200") >= 0 || response.indexOf("success") >= 0) {
+        success = true;
+    }
+
+    if (debugMode) {
+        if (success) Serial.println("Proxy: Data sent successfully to Firebase");
+        else Serial.println("Proxy: Request sent but no success confirmation");
+    }
+
+    client.stop();
+    if (!success) strcpy(lastError, "No success confirmation from server");
+    return success;
 }
 
 bool MXChipFirebase::isConnected() {

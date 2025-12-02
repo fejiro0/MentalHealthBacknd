@@ -104,8 +104,8 @@
 #ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD "12345679"
 #endif
-#ifndef PROXY_SERVER_IP
-#define PROXY_SERVER_IP "192.168.1.100"
+#ifndef PROXY_SERVER_HOST
+#define PROXY_SERVER_HOST "192.168.1.100"
 #endif
 #ifndef PROXY_SERVER_PORT
 #define PROXY_SERVER_PORT 3000
@@ -934,6 +934,84 @@ IntelligentSensorMonitor sensorMonitor;
 // Global Firebase client instance
 MXChipFirebase firebaseClient;
 
+// Runtime configuration variables (change without recompiling)
+char currentProxyHost[128] = PROXY_SERVER_HOST;
+int currentProxyPort = PROXY_SERVER_PORT;
+String wifiSsidStr = String(WIFI_SSID);
+String wifiPasswordStr = String(WIFI_PASSWORD);
+
+// Process serial commands (SET PROXY host[:port], SET WIFI ssid password)
+void processSerialCommands() {
+    if (!Serial || Serial.available() == 0) return;
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() == 0) return;
+    Serial.print("Received command: "); Serial.println(cmd);
+
+    if (cmd.startsWith("SET PROXY ")) {
+        String payload = cmd.substring(10);
+        payload.trim();
+        int colonIndex = payload.indexOf(':');
+        String hostPart = payload;
+        String portPart = "";
+        if (colonIndex > 0) {
+            hostPart = payload.substring(0, colonIndex);
+            portPart = payload.substring(colonIndex + 1);
+        }
+        hostPart.trim(); portPart.trim();
+            if (hostPart.length() > 0) {
+            strncpy(currentProxyHost, hostPart.c_str(), sizeof(currentProxyHost) - 1);
+            currentProxyHost[sizeof(currentProxyHost) - 1] = '\0';
+            if (portPart.length() > 0) {
+                currentProxyPort = portPart.toInt();
+            }
+            Serial.print("Proxy set to: "); Serial.print(currentProxyHost); Serial.print(":"); Serial.println(currentProxyPort);
+            // Try re-initializing the firebase client with the new host/port
+            if (WiFi.status() == WL_CONNECTED) {
+                if (firebaseClient.begin(currentProxyHost, currentProxyPort)) {
+                    Serial.println("Firebase client reinitialized with new proxy");
+                } else {
+                    Serial.println("Firebase client reinitialization FAILED");
+                }
+            }
+        }
+    } else if (cmd.startsWith("SET WIFI ")) {
+        String payload = cmd.substring(9);
+        payload.trim();
+        int firstSpace = payload.indexOf(' ');
+        if (firstSpace > 0) {
+            String ssid = payload.substring(0, firstSpace);
+            String pass = payload.substring(firstSpace + 1);
+            ssid.trim(); pass.trim();
+            if (ssid.length() > 0) {
+                wifiSsidStr = ssid;
+                wifiPasswordStr = pass;
+                Serial.print("WiFi set to SSID: "); Serial.print(wifiSsidStr); Serial.print(" (password length: "); Serial.print(wifiPasswordStr.length()); Serial.println(")");
+                // Reconnect using new WiFi credentials
+                Serial.println("Reconnecting WiFi with new credentials...");
+                WiFi.disconnect();
+                delay(200);
+                const char* ssid_ptr2 = wifiSsidStr.c_str();
+                const char* pwd_ptr2 = wifiPasswordStr.c_str();
+                if (WiFi.begin((char*)ssid_ptr2, (char*)pwd_ptr2) == WL_CONNECTED) {
+                    Serial.println("✅ WiFi Connected with new credentials!");
+                    if (firebaseClient.begin(currentProxyHost, currentProxyPort)) {
+                        Serial.println("✅ Firebase client initialized after WiFi reconnect");
+                    }
+                } else {
+                    Serial.println("❌ WiFi connect (runtime) failed - verify credentials and try again");
+                }
+            }
+        }
+    } else if (cmd.equalsIgnoreCase("GET CONFIG")) {
+        Serial.println("Current configuration:");
+        Serial.print("  WiFi SSID: "); Serial.println(wifiSsidStr);
+        Serial.print("  Proxy Host: "); Serial.print(currentProxyHost); Serial.print(":"); Serial.println(currentProxyPort);
+    } else {
+        Serial.println("Unknown command. Use 'SET PROXY host[:port]', 'SET WIFI ssid password', or 'GET CONFIG'.");
+    }
+}
+
 // ============================================================================
 // CLEAN, HUMAN-READABLE DISPLAY SYSTEM
 // ============================================================================
@@ -1069,7 +1147,14 @@ LSM6DS3_Direct lsm6ds3;
 // ============================================================================
 
 void setup() {
-  Serial.begin(115200);
+    Serial.begin(115200);
+    // Allow a brief window for runtime configuration commands via Serial
+    Serial.println("Type 'SET PROXY host[:port]' or 'SET WIFI ssid password' within 10 seconds to change runtime config");
+    unsigned long configStart = millis();
+    while (millis() - configStart < 10000) {
+        processSerialCommands();
+        delay(50);
+    }
     while (!Serial);
 
     Serial.println("=== MXChip AZ3166 - Direct Hardware Sensor Implementation ===");
@@ -1141,10 +1226,12 @@ void setup() {
     Serial.println("INITIALIZING WiFi CONNECTION...");
     Serial.println("============================================================");
     Serial.print("Connecting to WiFi: ");
-    Serial.println(WIFI_SSID);
+    Serial.println(wifiSsidStr);
     
     // Initialize WiFi using standard WiFi class (from AZ3166WiFi.h)
-    if (WiFi.begin(WIFI_SSID, WIFI_PASSWORD) != WL_CONNECTED) {
+    const char* ssid_ptr = wifiSsidStr.c_str();
+    const char* pwd_ptr = wifiPasswordStr.c_str();
+    if (WiFi.begin((char*)ssid_ptr, (char*)pwd_ptr) != WL_CONNECTED) {
         Serial.println("Connecting to WiFi...");
         int attempts = 0;
         while (WiFi.status() != WL_CONNECTED && attempts < 20) {
@@ -1173,12 +1260,13 @@ void setup() {
         firebaseClient.setDeviceId(DEVICE_ID);
         firebaseClient.setUpdateInterval(FIREBASE_UPDATE_INTERVAL_MS);
         
-        if (firebaseClient.begin(PROXY_SERVER_IP, PROXY_SERVER_PORT)) {
+        // Try to initialize client using runtime host & port
+        if (firebaseClient.begin(currentProxyHost, currentProxyPort)) {
             Serial.println("✅ Firebase client initialized");
             Serial.print("Proxy Server: ");
-            Serial.print(PROXY_SERVER_IP);
+            Serial.print(currentProxyHost);
             Serial.print(":");
-            Serial.println(PROXY_SERVER_PORT);
+            Serial.println(currentProxyPort);
         } else {
             Serial.println("❌ Firebase client initialization failed");
             Serial.print("Error: ");
@@ -1203,6 +1291,8 @@ void setup() {
 MotionData motion;
 
 void loop() {
+    // Evaluate runtime serial commands frequently
+    processSerialCommands();
     // Read sensor data
     float temperature = 0.0f, humidity = 0.0f;
     motion.sensorWorking = false; // Default to false

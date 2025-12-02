@@ -23,6 +23,7 @@ public:
     const char* getLastError();
 
 private:
+    // Use regular WiFiClient by default for HTTP proxy
     WiFiClient client;
     bool connected;
     bool debugMode;
