@@ -39,15 +39,33 @@ This Node.js proxy server forwards sensor data from MXChip AZ3166 to Firebase Re
 
 ## Hardware Configuration
 
-In your MXChip code, update the proxy server IP address:
+In your MXChip code, update the proxy server host or IP address. Use a hostname when pointing to a hosted backend (advanced), or a local IP for a local proxy (default behavior).
 
 ```cpp
-#define PROXY_SERVER_IP "192.168.1.100"  // Your computer's IP address
+// Use a hostname for hosted backends (e.g. "my-backend.onrender.com")
+// or a local IP for a local proxy
+// Hosted example (Render - requires HTTPS):
+// #define PROXY_SERVER_HOST "mentalhealthbacknd.onrender.com"
+// Because the device uses a simple HTTP client by default (WiFiClient), it cannot communicate with HTTPS-only endpoints
+// (like Render) without TLS support. Recommended ways to use a hosted backend:
+// 1) Use a local HTTP proxy (node backend on your PC) and set PROXY_SERVER_HOST to your PC IP (e.g., 192.168.1.100:3000)
+// 2) Use a Node.js proxy on the hosted provider (if you control it) that accepts HTTP from the device and forwards to Firebase
+// 3) Add TLS/HTTPS client (`WiFiClientSecure`) on the device (not implemented by default).
+// Local example:
+// #define PROXY_SERVER_HOST "192.168.1.100"
 ```
 
 To find your IP address:
 - **Windows:** `ipconfig` (look for IPv4 Address)
-- **Mac/Linux:** `ifconfig` or `ip addr show`
+-- **Mac/Linux:** `ifconfig` or `ip addr show`
+
+Update `PROXY_SERVER_HOST` in `src/config.h` with this hostname or IP address.
+You can also set the proxy host at runtime using the device's serial console (115200 baud), e.g.:
+
+```
+SET PROXY my-backend.onrender.com:3000
+GET CONFIG
+```
 
 ## Firebase Security Rules
 
@@ -60,6 +78,9 @@ To apply these rules:
 4. Click "Publish"
 
 **Note:** The rules require authentication (`auth != null`). Make sure anonymous authentication is enabled in Firebase Authentication settings.
+
+### HTTPS on hosted providers (Render)
+If you are using a hosted provider (like Render), the endpoint will typically be HTTPS on port `443`. The device will automatically select a secure TLS client if `PROXY_SERVER_PORT` is `443`. For quick testing, the device uses insecure TLS (no CA validation). For production, configure proper root CA verification in `MXChipFirebase`.
 
 ## Testing
 
